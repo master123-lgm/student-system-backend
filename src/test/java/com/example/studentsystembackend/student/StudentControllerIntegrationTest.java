@@ -11,6 +11,8 @@ import com.example.studentsystembackend.auth.LoginRequest;
 import com.example.studentsystembackend.auth.LoginResponse;
 import com.example.studentsystembackend.auth.RegisterRequest;
 import com.example.studentsystembackend.auth.Role;
+import com.example.studentsystembackend.auth.AuthAccountRepository;
+import com.example.studentsystembackend.auth.AuthService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +24,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -37,17 +40,25 @@ class StudentControllerIntegrationTest {
   @Autowired
   private StudentRepository studentRepository;
 
+  @Autowired
+  private AuthAccountRepository authAccountRepository;
+
+  @Autowired
+  private AuthService authService;
+
   @BeforeEach
   void setUp() {
     studentRepository.deleteAll();
+    authAccountRepository.deleteAll();
+    authService.seedDefaultAccounts();
   }
 
   @Test
   void shouldLoginAndReturnRole() throws Exception {
     LoginResponse loginResponse = login("admin", "admin123");
 
-    org.assertj.core.api.Assertions.assertThat(loginResponse.token()).isNotBlank();
-    org.assertj.core.api.Assertions.assertThat(loginResponse.role().name()).isEqualTo("ADMIN");
+    assertThat(loginResponse.token()).isNotBlank();
+    assertThat(loginResponse.role().name()).isEqualTo("ADMIN");
   }
 
   @Test
@@ -64,6 +75,28 @@ class StudentControllerIntegrationTest {
       .andExpect(jsonPath("$.username").value("newstudent"))
       .andExpect(jsonPath("$.role").value("STUDENT"))
       .andExpect(jsonPath("$.token").isString());
+  }
+
+  @Test
+  void shouldRegisterStudentAccountAndCreateStudentProfile() throws Exception {
+    RegisterRequest request = new RegisterRequest();
+    request.setUsername("newstudent");
+    request.setPassword("pass1234");
+    request.setRole(Role.STUDENT);
+
+    MvcResult result = mockMvc.perform(post("/api/auth/register")
+        .contentType(MediaType.APPLICATION_JSON)
+        .content(objectMapper.writeValueAsString(request)))
+      .andExpect(status().isOk())
+      .andReturn();
+
+    LoginResponse response = objectMapper.readValue(result.getResponse().getContentAsString(), LoginResponse.class);
+
+    mockMvc.perform(get("/api/students/me")
+        .header(HttpHeaders.AUTHORIZATION, bearerToken(response.token())))
+      .andExpect(status().isOk())
+      .andExpect(jsonPath("$.username").value("newstudent"))
+      .andExpect(jsonPath("$.studentId").value(org.hamcrest.Matchers.startsWith("REG-")));
   }
 
   @Test
@@ -86,9 +119,9 @@ class StudentControllerIntegrationTest {
     mockMvc.perform(post("/api/students")
         .header(HttpHeaders.AUTHORIZATION, bearerToken(token))
         .contentType(MediaType.APPLICATION_JSON)
-        .content(objectMapper.writeValueAsString(student("student"))))
+        .content(objectMapper.writeValueAsString(student("createdstudent"))))
       .andExpect(status().isCreated())
-      .andExpect(jsonPath("$.username").value("student"))
+      .andExpect(jsonPath("$.username").value("createdstudent"))
       .andExpect(jsonPath("$.grade").value("Pending"));
   }
 
@@ -99,14 +132,13 @@ class StudentControllerIntegrationTest {
     mockMvc.perform(post("/api/students")
         .header(HttpHeaders.AUTHORIZATION, bearerToken(token))
         .contentType(MediaType.APPLICATION_JSON)
-        .content(objectMapper.writeValueAsString(student("student"))))
+        .content(objectMapper.writeValueAsString(student("createdstudent"))))
       .andExpect(status().isForbidden());
   }
 
   @Test
   void shouldAllowTeacherToViewAllStudents() throws Exception {
     String token = login("teacher", "teacher123").token();
-    studentRepository.save(student("student"));
     studentRepository.save(student("learner2"));
 
     mockMvc.perform(get("/api/students")
@@ -118,7 +150,6 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldRejectStudentFromViewingAllStudents() throws Exception {
     String token = login("student", "student123").token();
-    studentRepository.save(student("student"));
 
     mockMvc.perform(get("/api/students")
         .header(HttpHeaders.AUTHORIZATION, bearerToken(token)))
@@ -128,7 +159,7 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldAllowStudentToViewOwnProfileOnly() throws Exception {
     String token = login("student", "student123").token();
-    Student ownStudent = studentRepository.save(student("student"));
+    Student ownStudent = studentRepository.findByUsername("student").orElseThrow();
     studentRepository.save(student("learner2"));
 
     mockMvc.perform(get("/api/students/me")
@@ -141,7 +172,6 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldRejectStudentViewingAnotherStudentById() throws Exception {
     String token = login("student", "student123").token();
-    studentRepository.save(student("student"));
     Student otherStudent = studentRepository.save(student("learner2"));
 
     mockMvc.perform(get("/api/students/{id}", otherStudent.getId())
@@ -152,7 +182,6 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldAllowStudentToUpdateOwnProfile() throws Exception {
     String token = login("student", "student123").token();
-    studentRepository.save(student("student"));
     StudentProfileUpdateRequest request = new StudentProfileUpdateRequest();
     request.setName("Student Updated");
     request.setCourse("Software Engineering");
@@ -173,7 +202,7 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldAllowTeacherToUpdateAcademicRecord() throws Exception {
     String token = login("teacher", "teacher123").token();
-    Student savedStudent = studentRepository.save(student("student"));
+    Student savedStudent = studentRepository.save(student("learner1"));
     StudentAcademicUpdateRequest request = new StudentAcademicUpdateRequest();
     request.setEnrolledCourses("OOP, Databases, Networking");
     request.setGrade("A");
@@ -191,7 +220,7 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldRejectStudentUpdatingAcademicRecord() throws Exception {
     String token = login("student", "student123").token();
-    Student savedStudent = studentRepository.save(student("student"));
+    Student savedStudent = studentRepository.save(student("learner1"));
     StudentAcademicUpdateRequest request = new StudentAcademicUpdateRequest();
     request.setEnrolledCourses("OOP");
     request.setGrade("A");
@@ -207,8 +236,8 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldAllowAdminToUpdateStudent() throws Exception {
     String token = login("admin", "admin123").token();
-    Student savedStudent = studentRepository.save(student("student"));
-    Student updatedStudent = student("student");
+    Student savedStudent = studentRepository.save(student("learner1"));
+    Student updatedStudent = student("learner1");
     updatedStudent.setCourse("Software Engineering");
     updatedStudent.setYear("Year 3");
     updatedStudent.setStatus("Graduated");
@@ -226,7 +255,7 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldAllowAdminToDeleteStudent() throws Exception {
     String token = login("admin", "admin123").token();
-    Student savedStudent = studentRepository.save(student("student"));
+    Student savedStudent = studentRepository.save(student("learner1"));
 
     mockMvc.perform(delete("/api/students/{id}", savedStudent.getId())
         .header(HttpHeaders.AUTHORIZATION, bearerToken(token)))
@@ -236,7 +265,7 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldRejectTeacherDeletingStudent() throws Exception {
     String token = login("teacher", "teacher123").token();
-    Student savedStudent = studentRepository.save(student("student"));
+    Student savedStudent = studentRepository.save(student("learner1"));
 
     mockMvc.perform(delete("/api/students/{id}", savedStudent.getId())
         .header(HttpHeaders.AUTHORIZATION, bearerToken(token)))
@@ -246,9 +275,9 @@ class StudentControllerIntegrationTest {
   @Test
   void shouldRejectDuplicateStudentId() throws Exception {
     String token = login("admin", "admin123").token();
-    studentRepository.save(student("student"));
+    Student existingStudent = studentRepository.save(student("learner1"));
     Student duplicateStudent = student("learner2");
-    duplicateStudent.setStudentId("ST-100");
+    duplicateStudent.setStudentId(existingStudent.getStudentId());
 
     mockMvc.perform(post("/api/students")
         .header(HttpHeaders.AUTHORIZATION, bearerToken(token))
@@ -261,7 +290,7 @@ class StudentControllerIntegrationTest {
     return new Student(
       null,
       "Amina Yusuf",
-      username.equals("student") ? "ST-100" : "ST-101",
+      "ST-" + username.toUpperCase(),
       username,
       "Computer Science",
       "CS-A",
